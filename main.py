@@ -42,7 +42,7 @@ def safe_json_loads(text):
     except Exception as e:
         print("----- JSON PARSE ERROR -----")
         print("RAW TEXT:", repr(text))
-        raise e
+        # raise e
 
 
 def user_input() -> UserInputs:
@@ -497,7 +497,11 @@ async def content_generator(concept: str) -> str:
                     if hasattr(part, "text") and part.text:
                         parts.append(part.text.strip())
                         print(" > ", part.text.strip())
-                final_output = parts
+                joined_parts = "".join(parts)
+                parsed_output = safe_json_loads(joined_parts)
+                print("Parsed_output", parsed_output)
+                if parsed_output is not None and "title" in parsed_output:
+                    final_output = parts
             print(f"{'=' * 80}")
 
     # print("XXXX" * 10)
@@ -532,7 +536,7 @@ async def content_generator(concept: str) -> str:
     print(joined_values)
     print("XXXX" * 10)
 
-    return joined_values
+    return final_output
 
 
 async def main():
@@ -820,5 +824,9 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    # asyncio.run(content_generator("python env setup"))
+    # asyncio.run(
+    #     content_generator(
+    #         "Advanced Data Structures and the Collections Module in python"
+    #     )
+    # )
     print("Program done")
