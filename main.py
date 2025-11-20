@@ -1,12 +1,15 @@
 import asyncio
 import json
+import re
 from dotenv import load_dotenv
 from google.adk.agents import Agent, SequentialAgent, LoopAgent
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.google_llm import Gemini
+from google.adk.models import LlmRequest, LlmResponse
 from google.adk.runners import InMemoryRunner
 from google.adk.tools import AgentTool, FunctionTool
 from google.genai import types
-from typing import TypedDict
+from typing import TypedDict, Optional
 from google.adk.plugins.logging_plugin import (
     LoggingPlugin,
 )
@@ -43,9 +46,9 @@ def safe_json_loads(text):
 
 def user_input() -> UserInputs:
     input_questions = [
-        "Topic of interest (eg. Basics python3 programming)",
-        "Difficulty (eg. Beginner, Intermediate, Advance)",
-        "Duration in days (eg. 1, 2, 5, 15, 30)",
+        "Topic of interest (eg. AI developer, Cloud technologies, Python learning)",
+        "Experience level (eg. 1 year, 2 years, 10 years)",
+        "Duration in days (eg. 1, 7, 10, 15, 30)",
     ]
 
     user_inputs = []
@@ -55,9 +58,9 @@ def user_input() -> UserInputs:
         user_inputs.append(user_response)
 
     return {
-        "topic": user_inputs[0],
-        "learner_profile": user_inputs[1],
-        "duration": int(user_inputs[2].strip()),
+        "topic": user_inputs[0].strip(),
+        "learner_profile": user_inputs[1].strip(),
+        "duration": user_inputs[2].strip(),
     }
 
 
@@ -98,6 +101,122 @@ def get_current_time(city: str) -> dict:
     """
 
     return {"city": city, "current_time": "10:30:01", "status": "Success"}
+
+
+def basic_input_sanitize(topic: str) -> str:
+    t = topic.strip()
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+MAX_TOPIC_LENGTH = 200
+MIN_TOPIC_LENGTH = 3
+ALLOWED_TOPIC_RE = re.compile(r"^[\w\s\-\:\,\.&\(\)']+$", re.UNICODE)
+ALLOWED_EXPERIENCE_PATTERN = r"^\d+ year(s)?$"
+BLOCKED_KEYWORDS = {
+    "bomb",
+    "gun",
+    "how to make",
+    "kill",
+    "suicide",
+    "child abuse",
+    "porn",
+    "sex",
+    "hate speech",
+    "terrorist",
+    "attack",
+    "assassinate",
+}
+
+
+def contains_blocked_keyword(text: str) -> bool:
+    lower = text.lower()
+
+    for kw in BLOCKED_KEYWORDS:
+        if kw in lower:
+            return True
+
+    return False
+
+
+def lesson_before_model_callback(
+    callback_context: CallbackContext, llm_request: LlmRequest
+) -> Optional[LlmResponse]:
+    """
+    Runs just before the LLM call
+
+    Returns:
+        - None -> proceed with model call (possibly after modifying the llm_request in-place)
+        - LlmResponse -> skip model response use this response instead
+    """
+
+    prompt_test = ""
+
+    try:
+        if hasattr(llm_request, "contents") and llm_request.contents:
+            if (
+                hasattr(llm_request.contents[0], "parts")
+                and llm_request.contents[0].parts
+            ):
+                if (
+                    hasattr(llm_request.contents[0].parts[0], "text")
+                    and llm_request.contents[0].parts[0].text
+                ):
+                    prompt_test = llm_request.contents[0].parts[0].text
+                else:
+                    prompt_test = str(llm_request)
+            else:
+                prompt_test = str(llm_request)
+        elif hasattr(llm_request, "prompt") and llm_request.prompt:
+            prompt_test = llm_request.prompt
+        elif hasattr(llm_request, "messages") and llm_request.messages:
+            prompt_test = " ".join([m.get("content", "") for m in llm_request.messages])
+        else:
+            prompt_test = str(llm_request)
+
+    except Exception as e:
+        print("Exception -> ", e)
+        prompt_test = str(llm_request)
+
+    print("prompt_test >> ", prompt_test, "")
+    prompt_test = json.loads(basic_input_sanitize(prompt_test))
+    print("Santized input: ", prompt_test["topic"])
+
+    topic = prompt_test["topic"]
+    experience = prompt_test["learner_profile"]
+    duration = prompt_test["duration"]
+
+    if len(topic) < MIN_TOPIC_LENGTH:
+        return LlmResponse(
+            text="Error: Too small for the lesson plan generator. Please provide a specific educational topic"
+        )
+
+    if len(topic) > MAX_TOPIC_LENGTH:
+        return LlmResponse(
+            text=f"Error: Topic too long (>{MAX_TOPIC_LENGTH} reached).  Please shorten the topic"
+        )
+
+    if not ALLOWED_TOPIC_RE.match(topic):
+        return LlmResponse(
+            text=f"Error: topic contains disallowed characters. Please use simple text (letters, numbers, spaces and punctuation)."
+        )
+
+    if contains_blocked_keyword(topic):
+        return LlmResponse(
+            text="Error: the requested topic is not permitted for this educational tool."
+        )
+
+    if not re.match(ALLOWED_EXPERIENCE_PATTERN, experience):
+        return LlmResponse(
+            text="Error: invalid experience error format.  Please enter the experience in this format (1 year, 2 years etc)."
+        )
+
+    if not re.match(r"^\d+$", duration):
+        return LlmResponse(
+            text="Error invalid duration format. Please enter the duration in integer"
+        )
+
+    return None
 
 
 async def main():
@@ -171,6 +290,7 @@ async def main():
 
         """,
         output_key="generated_plan",
+        before_model_callback=lesson_before_model_callback,
     )
 
     # lesson plan reviewer agent
@@ -222,7 +342,6 @@ async def main():
 
             """,
         output_key="reviewer_output",
-        tools=[FunctionTool(exit_loop)],
     )
 
     lesson_plan_refiner_agent = Agent(
@@ -234,15 +353,15 @@ async def main():
 
             1. Inputs:
 
-            - Generated Plan: The original lesson plan array from the generator agent (["Day 1 Topic", "Day 2 Topic", ...]).
-            - Reviewer feedback: Feedback provided by the Lesson Plan Reviewer Agent. It may include:
-            - Specific issues with certain days/topics.
-            - Suggestions for replacing, reordering, or refining topics.
-            - General recommendations for improving progression or suitability for the user’s experience.
-            - User Inputs:
-            - Topic: The subject area.
-            - Experience: User’s experience level (e.g., 1 year, 5 years, 20 years).
-            - Duration: Number of days for the lesson plan.
+            1.1. Generated Plan: The original lesson plan array from the generator agent (["Day 1 Topic", "Day 2 Topic", ...]).
+            1.2. Reviewer feedback: Feedback provided by the Lesson Plan Reviewer Agent. It may include:
+                - Specific issues with certain days/topics.
+                - Suggestions for replacing, reordering, or refining topics.
+                - General recommendations for improving progression or suitability for the user’s experience.
+                - User Inputs:
+                    - Topic: The subject area.
+                    - Experience: User’s experience level (e.g., 1 year, 5 years, 20 years).
+                    - Duration: Number of days for the lesson plan.
 
             Your Task:
 
@@ -264,7 +383,7 @@ async def main():
 
             Output Rules:
 
-            - Only output the refined lesson plan array or exit_loop().=
+            - Only output the refined lesson plan array or exit_loop().
             - Ensure the plan strictly adheres to the user’s topic, experience, and duration.
             - Do not add additional days or topics beyond the given duration.
             - Maintain a clear and progressive flow of concepts suitable for the user’s experience level.
@@ -315,7 +434,12 @@ async def main():
 
     response = await runner.run_debug(json.dumps(user_response))
 
-    print("\n\n\n Outputing", "\n\n\n")
+    print("\n\n\n Output:\n")
+
+    print("\n\n\n Response Start")
+    print(response)
+    print("\n\n\n Response End")
+
     final_plan = None
     for step in response:
         if hasattr(step, "content") and step.content.parts:
@@ -336,6 +460,7 @@ async def main():
         print("\nFINAL LESSON PLAN:")
         for day in final_plan:
             print(day)
+
     else:
         print("No plan generated.")
 
