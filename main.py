@@ -64,15 +64,22 @@ def user_input() -> UserInputs:
     }
 
 
-def output_only_response(response) -> None:
-    for i in range(len(response)):
-        if (
-            response[i].content.parts
-            and response[i].content.parts[0]
-            and response[i].content.parts[0].function_response
-            and response[i].content.parts[0].function_response.response
-        ):
-            print(f">>> {response[i].content.parts[0].function_response.response}")
+def user_concept_selection(available_topics: list[str]) -> str:
+    while True:
+        try:
+            user_input = int(
+                input(
+                    "Please select the concept to learn. Eg. If you want to select day 5 please enter 5: \t"
+                )
+            )
+            if 0 > user_input <= len(available_topics):
+                return available_topics[user_input - 1]
+            else:
+                print("Invalid user input.  Please select again")
+                continue
+        except:
+            print("Invalid user input.  Please select again")
+            continue
 
 
 def exit_loop():
@@ -81,12 +88,6 @@ def exit_loop():
         "status": "approved",
         "message": "Lesson plan approved. Exiting refinement loop.",
     }
-
-
-def extract_lesson_plan_response(response) -> None:
-    print(f"{'='*100}")
-    print(response)
-    print(f"{'='*100}")
 
 
 def get_current_time(city: str) -> dict:
@@ -127,6 +128,8 @@ BLOCKED_KEYWORDS = {
     "attack",
     "assassinate",
 }
+
+content_map = {}
 
 
 def contains_blocked_keyword(text: str) -> bool:
@@ -217,6 +220,266 @@ def lesson_before_model_callback(
         )
 
     return None
+
+
+def extract_latest_output(events):
+    """
+    Universal extractor:
+    - Extracts the last valid JSON object found anywhere in the event logs.
+    - If no JSON exists, returns the last "APPROVED" (if present).
+    - Handles reviewer/refiner/generator outputs equally.
+    """
+
+    last_json = None
+    last_approved = None
+
+    for event in events:
+        if not hasattr(event, "content") or not event.content:
+            continue
+
+        parts = getattr(event.content, "parts", [])
+        if not parts:
+            continue
+
+        for part in parts:
+            if part is None:
+                continue
+
+            # TEXT extraction
+            text = getattr(part, "text", None)
+            if isinstance(text, str):
+                stripped = text.strip()
+
+                # Track "APPROVED"
+                if stripped == "APPROVED":
+                    last_approved = "APPROVED"
+
+                # Extract JSON inside ```json blocks
+                json_block = re.search(r"```json\s*(.*?)```", stripped, re.DOTALL)
+                if json_block:
+                    raw_json = json_block.group(1).strip()
+                    try:
+                        parsed = json.loads(raw_json)
+                        last_json = parsed  # overwrite with latest valid JSON
+                    except Exception:
+                        pass
+
+            # FUNCTION RESPONSE (exit_loop)
+            func_resp = getattr(part, "function_response", None)
+            if func_resp:
+                response_data = func_resp.response
+                if (
+                    isinstance(response_data, dict)
+                    and response_data.get("status") == "approved"
+                ):
+                    last_approved = "APPROVED"
+
+    # Priority 1: last valid JSON
+    if last_json is not None:
+        return last_json
+
+    # Priority 2: final APPROVED
+    if last_approved is not None:
+        return "APPROVED"
+
+    return None
+
+
+async def content_generator(concept: str) -> str:
+    print("content_generator -> ", concept)
+
+    content_generator_agent = Agent(
+        model=Gemini(model="gemini-2.5-flash", retry_options=retry_config),
+        name="content_generator_agent",
+        description="output the generated content for a given topic/concept.",
+        instruction="""
+            You are an expert AI Content Generator for educational purposes. Your task is to generate **high-quality, concise, and factually accurate content** for a single lesson concept or topic provided by the user. You will receive:
+
+            - topic/concept: The lesson topic to generate content for.
+
+            Mandatory:
+            Also, make sure you keep the generated content as 'original_content' in the state of the complete application - Save in state['original_content']
+
+            Your responsibilities:
+
+            1. Generate content strictly in JSON format with the following fields:
+
+            {{
+            "title": "<Title of the lesson, concise and informative>",
+            "description": "<A short summary of the lesson, 2-3 sentences>",
+            "detailed_explanation": "<Detailed explanation of the concept/topic. Include examples, code samples, diagrams (if applicable), or step-by-step explanation. Keep it concise, easy to understand, and factually accurate.>",
+            "external_resources": {{
+                "free": [
+                {{
+                    "title": "<Course/Resource title>",
+                    "url": "<URL of the resource>",
+                    "rating": "<Rating or reviews>",
+                    "price": "<Price if any, else 0>",
+                    "value_for_money": "<High/Medium/Low>"
+                }}
+                ... (maximum 5 items)
+                ],
+                "paid": [
+                {{
+                    "title": "<Course/Resource title>",
+                    "url": "<URL of the resource>",
+                    "rating": "<Rating or reviews>",
+                    "price": "<Price in USD or local currency>",
+                    "value_for_money": "<High/Medium/Low>"
+                }}
+                ... (maximum 5 items)
+                ]
+            }}
+            }}
+
+            2. Requirements and Rules:
+
+            - **Strict JSON only:** Do not include any text outside JSON. Invalid JSON is unacceptable.
+            - **Fact-checking:** Ensure all explanations are accurate; do not hallucinate. Use Google search tools if required.
+            - **Content style:** Short, clear, and informative. Suitable for learners with basic to intermediate knowledge.
+            - **Code/Example inclusion:** Include code snippets or examples where relevant. Escape all curly braces in code snippets with double braces (e.g., `{{` and `}}`).
+            - **External resources:** List only the top 5 free and top 5 paid resources. Sort by reviews, price, and value for money. Use reputable sources only.
+            - **No filler content:** Avoid verbose introductions or unnecessary commentary.
+            - **JSON validation:** Ensure all strings are properly quoted, arrays and objects are well-formed, and there are no trailing commas.
+            - **Avoid subjective statements** unless sourced from external reviews.
+
+            3. Example structure (do NOT copy content):
+
+            {{
+            "title": "Introduction to Python Functions",
+            "description": "Learn the basics of Python functions and how to use them effectively.",
+            "detailed_explanation": "A Python function is a reusable block of code that performs a specific task. Example:\\n```python\\ndef greet(name):\\n    return f\"Hello, name!\"\\n```\\nFunctions allow modularity and easier maintenance of code.",
+            "external_resources": {{
+                "free": [
+                {{ "title": "Python Official Tutorial", "url": "https://docs.python.org/3/tutorial/", "rating": "4.8/5", "price": "0", "value_for_money": "High" }},
+                ...
+                ],
+                "paid": [
+                {{ "title": "Complete Python Bootcamp", "url": "https://www.udemy.com/course/complete-python-bootcamp/", "rating": "4.7/5", "price": "$12.99", "value_for_money": "High" }},
+                ...
+                ]
+            }}
+            }}
+
+            Your output must **strictly follow the JSON structure above** and include both free and paid resources. Focus on concise, accurate, and high-quality educational content.
+            """,
+        output_key="generated_content",
+    )
+
+    content_reviewer_agent = Agent(
+        model=Gemini(model="gemini-2.5-flash", retry_options=retry_config),
+        name="content_reviewer_agent",
+        description="output the feedback if any in a predefined JSON output format otherwise 'APPROVED' as output",
+        instruction="""
+            You are an expert Lesson Content Reviewer with 10+ years of experience in educational content quality and instructional design.
+
+            Your task is to review the JSON output generated by the Content Generator Agent.
+
+            You will receive:
+            - topic/concept: The lesson topic
+            - generated_content: JSON content generated for the lesson
+
+            Responsibilities:
+
+            1. Review the content for:
+            - **Accuracy**: Verify all facts, examples, and code.
+            - **Clarity & Conciseness**: Content must be easy to understand and not verbose.
+            - **Completeness**: JSON must have all required fields (title, description, detailed_explanation, external_resources with top 5 free/paid resources).
+            - **External Resources**: Must be reputable, sorted by reviews, price, and value for money.
+            - **JSON Validity**: Ensure well-formed JSON; no trailing commas.
+            - **Code Examples**: Check if examples or code snippets are correct.
+
+            2. Output Rules:
+            - If the content is perfect and requires **no changes**, your output must be the single string:
+                "APPROVED"
+            - If there are issues, output **strict JSON only** in the following format:
+
+            {
+            "review_status": "REJECTED",
+            "comments": [
+                "<Actionable feedback comment 1>",
+                "<Actionable feedback comment 2>",
+                ...
+            ]
+            }
+
+            3. Important:
+            - Do not output any text outside the JSON or the single string "APPROVED".
+            - Feedback comments should be **specific and actionable**, e.g., "Fix the code example for integer division", "Add one more reputable free resource", "Clarify the explanation of NoneType".
+
+            Remember: Your output will control whether the content goes back to the Refiner Agent or exits the loop.
+            """,
+        output_key="reviewer_feedback",
+    )
+
+    content_refiner_agent = Agent(
+        model=Gemini(model="gemini-2.5-flash", retry_options=retry_config),
+        name="content_refiner_agent",
+        description="output the refined output for the content reviewer to review otherwise exit the loop",
+        instruction="""
+            You are an expert AI Content Refiner. Your job is to improve lesson content generated by the Content Generator Agent based on feedback from the Reviewer Agent.
+
+            Mandatory:
+                - Also, make sure you keep the refined latest generated content as 'refined_content' in the state of the complete application and overwrite if required (before "APPROVED" value) - Save in state['refined_content']
+
+            You will receive:
+            - topic/concept: The lesson topic
+            - generated_content: The JSON content generated by the Content Generator
+            - reviewer_feedback: Either the string "APPROVED" or a JSON object with actionable feedback
+
+            Your responsibilities:
+
+            1. If `reviewer_feedback` is the string "APPROVED":
+                - Call the `exit_loop` tool to finalize the content.
+                - Do not return any other output.
+
+            2. If `reviewer_feedback` contains actionable feedback (JSON with comments):
+                - Refine the `generated_content` according to the reviewer comments.
+                - Ensure improvements are specific, concise, and factually accurate.
+                - Maintain **strict JSON structure**:
+            {
+            "title": "<Refined lesson title>",
+            "description": "<Refined 2-3 sentence summary>",
+            "detailed_explanation": "<Refined detailed explanation, including examples or code snippets>",
+            "external_resources": {
+                "free": [ ... up to 5 items ... ],
+                "paid": [ ... up to 5 items ... ]
+            }
+            }
+
+            3. Rules:
+                - Fact-check all content; avoid hallucinations.
+                - Correct any errors or inconsistencies noted in the reviewer feedback.
+                - Include or improve code snippets or examples as needed.
+                - Ensure external resources are relevant, reputable, and within top 5 free/paid.
+                - Output only the refined JSON; do not include any extra commentary or text.
+
+            Remember: Your output will be sent back to the Content Reviewer Agent for another review cycle if changes were made, or will exit the loop if approved.
+            """,
+        output_key="refined_content",
+        tools=[FunctionTool(exit_loop)],
+    )
+
+    content_refinement_loop = LoopAgent(
+        name="ContentRefinementLoop",
+        sub_agents=[content_reviewer_agent, content_refiner_agent],
+        max_iterations=5,  # Prevents infinite loops
+    )
+
+    root_agent = SequentialAgent(
+        name="ContentPlanPipeline",
+        sub_agents=[content_generator_agent, content_refinement_loop],
+    )
+
+    runner = InMemoryRunner(agent=root_agent, plugins=[LoggingPlugin()])
+
+    response = await runner.run_debug(concept)
+
+    print("Response", response)
+
+    final_lesson = extract_latest_output(response)
+
+    print(final_lesson)
 
 
 async def main():
@@ -461,10 +724,25 @@ async def main():
         for day in final_plan:
             print(day)
 
+        while True:
+            concept_tobe_used = user_concept_selection(final_plan)
+            print("Concept -> ", concept_tobe_used)
+
+            if content_map.get(concept_tobe_used, ""):
+                content_output = content_generator(concept_tobe_used)
+                print("Storing content")
+                content_map[concept_tobe_used] = content_output
+            else:
+                print(
+                    "Content Already exists Found => ",
+                    content_map.get(concept_tobe_used, ""),
+                )
+
     else:
         print("No plan generated.")
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+    # asyncio.run(content_generator("python env setup"))
     print("Program done")
