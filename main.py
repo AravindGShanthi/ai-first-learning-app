@@ -1,13 +1,17 @@
 import asyncio
 import json
 import re
+import uuid
 from dotenv import load_dotenv
+from google.adk.runners import Runner
 from google.adk.agents import Agent, SequentialAgent, LoopAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.google_llm import Gemini
 from google.adk.models import LlmRequest, LlmResponse
 from google.adk.runners import InMemoryRunner
 from google.adk.tools import FunctionTool
+from google.adk.apps.app import App, ResumabilityConfig
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from google.adk.tools.tool_context import ToolContext
 from typing import TypedDict, Optional
@@ -91,6 +95,17 @@ def user_concept_selection(available_topics: list[str]) -> str:
             continue
 
 
+def exit_inner_loop(tool_context: ToolContext):
+    """Call this function ONLY when the reviewer wants to exit the loop, indicating the lesson/content plan is finished and no more changes are needed."""
+
+    print(f"  [Tool Call] exit_loop triggered by {tool_context.agent_name}")
+
+    return {
+        "status": "approved",
+        "message": "Lesson/content plan approved. Exiting refinement loop.",
+    }
+
+
 def exit_loop(tool_context: ToolContext):
     """Call this function ONLY when the reviewer wants to exit the loop, indicating the lesson/content plan is finished and no more changes are needed."""
 
@@ -101,6 +116,47 @@ def exit_loop(tool_context: ToolContext):
         "status": "approved",
         "message": "Lesson/content plan approved. Exiting refinement loop.",
     }
+
+
+def human_feedback_input(
+    lesson_plans: list[str],
+    tool_context: ToolContext,
+    human_input: Optional[str] = "",
+) -> dict:
+    """
+    Ask for human feedback.  This function presents the lesson plans to the end user to get the feedback from the input.
+
+    Args:
+        lesson_plans: this is the final generated plans from the refinement loop
+        human_input: this is the human provided feedback input
+
+    Returns:
+        Dictionary with user approval
+    """
+
+    if not tool_context.tool_confirmation:
+        tool_context.request_confirmation(
+            hint=f"Please review and approve the lesson plans:\n {",\n".join(lesson_plans)}",
+            payload={"lesson_plans": lesson_plans},
+        )
+
+        return {
+            "status": "pending",
+            "message": f"Request for lesson plan approval is pending, the lesson plans:\n {",\n".join(lesson_plans)}",
+        }
+
+    tc = tool_context.tool_confirmation
+    # 1) confirmed boolean (direct attribute)
+    confirmed = getattr(tc, "confirmed", None)
+
+    feedback_text = human_input or ""
+
+    print("\n\nOUTPUT", confirmed, feedback_text, human_input)
+
+    if confirmed:
+        return {"status": "approved", "feedback": feedback_text}
+    else:
+        return {"status": "rejected", "feedback": feedback_text or "rejected"}
 
 
 def get_current_time(city: str) -> dict:
@@ -296,6 +352,61 @@ def extract_latest_output(events):
         return "APPROVED"
 
     return None
+
+
+def check_for_approval(events):
+    """
+    check if events contain an approval request
+
+    Return:
+        dict with approval details or None
+    """
+
+    for event in events:
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if (
+                    part.function_call
+                    and part.function_call.name == "adk_request_confirmation"
+                ):
+                    return {
+                        "approval_id": part.function_call.id,
+                        "invocation_id": event.invocation_id,
+                    }
+    return None
+
+
+def print_agent_response(events):
+    """Print agent's text responses from events."""
+    for event in events:
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                if part.text:
+                    print(f"Agent > {part.text}")
+
+
+def create_approval_response(approval_info: dict, user_feedback: dict):
+    """Create approval response message"""
+    # FunctionResponse must contain only the 'confirmed' boolean to comply
+    # with the Google ADK. Attach any free-text human feedback as a separate
+    # text part in the same Content so it becomes part of the resumed
+    # conversation context and can be consumed by downstream agents.
+    confirmed_bool = bool(user_feedback.get("status", False))
+    feedback_text = str(user_feedback.get("feedback", ""))
+
+    confirmation_response = types.FunctionResponse(
+        id=approval_info["approval_id"],
+        name="adk_request_confirmation",
+        response={"confirmed": confirmed_bool},
+    )
+
+    parts = [types.Part(function_response=confirmation_response)]
+    if feedback_text:
+        # Add a separate text part carrying the human feedback (JSON encoded
+        # so downstream agents can parse it reliably).
+        parts.append(types.Part(text=json.dumps({"human_input": feedback_text})))
+
+    return types.Content(role="user", parts=parts)
 
 
 CONTENT_GENERATOR_OUTPUT = "generated_content"
@@ -626,10 +737,12 @@ async def main():
             - Experience: The user’s experience in the topic (e.g., 1 year, 5 years, 20 years). Use this to evaluate if the complexity and depth of the lessons are appropriate.
             - Duration: Number of days for which the lesson plan is intended. Ensure the plan covers only this duration and one topic/concept per day.
             - Generated Plan: A list of strings representing the daily topics/concepts, in order.
+            - Optional - Human Input: A dict with feedback key (human in the loop feedback). 
 
             Your Tasks:
             1. Review the Generated Plan carefully. Consider:
             - Relevance of each day’s topic to the main Topic.
+            - Incorporate human feedback mandatorily if available, if it is off the topic, then skip otherwise include into the list and make sure it satisfy the existing conditions.
             - Complexity relative to the user’s Experience.
             - Logical progression of topics over the given Duration.
             - Adherence to the rule of one topic/concept per day.
@@ -682,6 +795,8 @@ async def main():
                     - Topic: The subject area.
                     - Experience: User’s experience level (e.g., 1 year, 5 years, 20 years).
                     - Duration: Number of days for the lesson plan.
+            1.3. Optional Input - Human Input (human_input): Feedback provided by the human in the loop (user).
+                - It includes the feedback in text.
 
             Your Task:
 
@@ -736,23 +851,122 @@ async def main():
             "Day 3: File Handling and Exception Management"]
         """,
         output_key="generated_plan",
-        tools=[FunctionTool(exit_loop)],
+        tools=[FunctionTool(exit_inner_loop)],
+    )
+
+    human_feedback_agent = Agent(
+        model=Gemini(model="gemini-2.5-flash", retry_options=retry_config),
+        name="human_feedback_agent",
+        description="human review and approve the final refined lesson plan",
+        instruction="""
+            You are an human feedback request agent
+
+            1. Use the human_feedback_input tool with the latest final generated lesson plan and human provided feedback if available or else use None as inputs, if human status is "approved" call the exit_loop tool to exit the loop.
+            2. If the human feedback status is "pending", inform the user that the approval is pending.
+            3. If the human feedback status is "rejected" then continue with the loop.
+        """,
+        tools=[FunctionTool(exit_loop), FunctionTool(human_feedback_input)],
+        output_key="human_input",
     )
 
     lesson_plan_refinement_loop = LoopAgent(
         name="LessonRefinementLoop",
         sub_agents=[lesson_plan_reviewer_agent, lesson_plan_refiner_agent],
-        max_iterations=5,  # Prevents infinite loops
+        max_iterations=1,  # Prevents infinite loops
+    )
+
+    human_feedback_loop = LoopAgent(
+        name="HumanFeedbackLoop",
+        sub_agents=[lesson_plan_refinement_loop, human_feedback_agent],
+        max_iterations=5,
     )
 
     root_agent = SequentialAgent(
         name="LessonPlanPipeline",
-        sub_agents=[lesson_plan_generator_agent, lesson_plan_refinement_loop],
+        sub_agents=[lesson_plan_generator_agent, human_feedback_loop],
     )
 
-    runner = InMemoryRunner(agent=root_agent, plugins=[LoggingPlugin()])
+    lesson_plan_app = App(
+        name="lesson_plan_coordinator",
+        root_agent=root_agent,
+        resumability_config=ResumabilityConfig(is_resumable=True),
+        plugins=[LoggingPlugin()],
+    )
 
-    events = await runner.run_debug(json.dumps(user_response))
+    session_service = InMemorySessionService()
+
+    runner = Runner(app=lesson_plan_app, session_service=session_service)
+
+    session_id = f"lesson_{uuid.uuid4().hex[:8]}"
+
+    await session_service.create_session(
+        app_name="lesson_plan_coordinator", user_id="test_user", session_id=session_id
+    )
+
+    query_content = types.Content(
+        role="user", parts=[types.Part(text=json.dumps(user_response))]
+    )
+
+    events = []
+
+    async for event in runner.run_async(
+        user_id="test_user", session_id=session_id, new_message=query_content
+    ):
+        events.append(event)
+
+    approval_info = check_for_approval(events)
+
+    if approval_info:
+        print("APPROVAL INFO", approval_info)
+        # {'approval_id': 'adk-2fa9b58d-d7e1-431d-b5bb-0852a11812a3', 'invocation_id': 'e-430471c1-c705-4b30-84b4-f6b0c2cc97f2'}
+
+        # Ask explicit approval and optional feedback text. We send both the
+        # boolean approval and the human's actual feedback text back to the
+        # paused invocation so the refiner agent (or human-feedback agent)
+        # can use it when resuming.
+        approved_input = (
+            input("Approve the lesson plan? (y/n) [y = approve]: ").strip().lower()
+        )
+
+        approved_bool = approved_input in ("y", "yes", "approve", "approved")
+
+        feedback_text = input(
+            "Optional feedback (enter any comments to pass to the refiner agent): "
+        ).strip()
+
+        print(
+            "Hello -world ",
+            create_approval_response(
+                approval_info=approval_info,
+                user_feedback={
+                    "status": approved_bool,
+                    "feedback": feedback_text,
+                },
+            ),
+        )
+
+        async for event in runner.run_async(
+            user_id="test_user",
+            session_id=session_id,
+            new_message=create_approval_response(
+                approval_info=approval_info,
+                user_feedback={
+                    "status": approved_bool,
+                    "feedback": feedback_text,
+                },
+            ),
+            invocation_id=approval_info["invocation_id"],
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        print(f"Agent response > {part.text}")
+    else:
+        print_agent_response(events)
+
+    return
+
+    # events = await runner.run_debug(json.dumps(user_response))
 
     # print("\n\n\n Output:\n")
 
@@ -830,3 +1044,10 @@ if __name__ == "__main__":
     #     )
     # )
     print("Program done")
+
+
+# TODO:
+# 1. Add human in the loop to get the feedback for lesson plan and regenerate if necessary
+# 2. Give Google search tool to Content creator agent for course and content search.
+# 3. Need to evaluate the AI models for optimal performance
+# 4. Deploy the model in production using Goole cloud
