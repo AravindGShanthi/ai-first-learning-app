@@ -154,6 +154,19 @@ def human_feedback_input(
 
     feedback_text = human_input or ""
 
+    if not feedback_text and hasattr(tool_context, "user_content"):
+        for part in getattr(tool_context.user_content, "parts", []):
+            text = getattr(part, "text", None)
+            if text:
+                print("TEXT ===> ", text)
+                try:
+                    feedback_json = json.loads(text)
+                    if "human_input" in feedback_json:
+                        feedback_text = feedback_json["human_input"]
+                        break
+                except Exception:
+                    continue
+
     print("\n\nOUTPUT", confirmed, feedback_text, human_input)
 
     if confirmed:
@@ -795,7 +808,7 @@ async def main():
             - Experience: The user’s experience in the topic (e.g., 1 year, 5 years, 20 years). Use this to evaluate if the complexity and depth of the lessons are appropriate.
             - Duration: Number of days for which the lesson plan is intended. Ensure the plan covers only this duration and one topic/concept per day.
             - Generated Plan: A list of strings representing the daily topics/concepts, in order.
-            - Optional - Human Input: A dict with feedback key (human in the loop feedback). 
+            - Human Input: feedback from the user (HITL), need to consider while reviewing the lesson plan. 
 
             Your Tasks:
             1. Review the Generated Plan carefully. Consider:
@@ -853,8 +866,8 @@ async def main():
                     - Topic: The subject area.
                     - Experience: User’s experience level (e.g., 1 year, 5 years, 20 years).
                     - Duration: Number of days for the lesson plan.
-            1.3. Optional Input - Human Input (human_input): Feedback provided by the human in the loop (user).
-                - It includes the feedback in text.
+            1.3. Human Input (human_input): Feedback provided by the user (human in the loop).
+                - It includes the feedback in text, must include while refining the lesson plan.  
 
             Your Task:
 
