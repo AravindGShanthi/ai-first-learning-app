@@ -78,6 +78,9 @@ def user_concept_selection(available_topics: list[str]) -> str:
                 )
             )
 
+            if user_input < 0:
+                return "EXIT"
+
             print(
                 "User input => ",
                 user_input,
@@ -650,13 +653,69 @@ async def content_generator(concept: str) -> str:
     return final_output
 
 
+events = []
+
+
+async def ai_executor(
+    runner: Runner,
+    user_id: str,
+    session_id: str,
+    query_content: str,
+    invocation_id: Optional[str] = None,
+):
+    print(
+        "\n\nExecuting AI Executer -- ",
+        user_id,
+        session_id,
+        query_content,
+        invocation_id,
+    )
+    dummy_events = []
+    if invocation_id:
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=query_content,
+            invocation_id=invocation_id,
+        ):
+            dummy_events.append(event)
+    else:
+        return
+
+    events = dummy_events
+
+    approval_info = check_for_approval(events)
+
+    print("Approval Info", approval_info)
+
+    if approval_info:
+        approved_input = (
+            input("Approve the lesson plan? (y/n) [y = approve]: ").strip().lower()
+        )
+
+        approved_bool = approved_input in ("y", "yes", "approve", "approved")
+
+        feedback_text = input(
+            "Optional feedback (enter any comments to pass to the refiner agent): "
+        ).strip()
+
+        query_content = create_approval_response(
+            approval_info=approval_info,
+            user_feedback={
+                "status": approved_bool,
+                "feedback": feedback_text,
+            },
+        )
+
+        await ai_executor(runner, user_id, session_id, query_content, invocation_id)
+    else:
+        return
+
+
 async def main():
     # Get user input
     user_response = user_input()
 
-    print("User response ", user_response)
-
-    # lesson plan generator agent
     lesson_plan_generator_agent = Agent(
         model=Gemini(model="gemini-2.5-flash", retry_options=retry_config),
         name="lesson_plan_generator_agent",
@@ -724,7 +783,6 @@ async def main():
         before_model_callback=lesson_before_model_callback,
     )
 
-    # lesson plan reviewer agent
     lesson_plan_reviewer_agent = Agent(
         model=Gemini(model="gemini-2.5-flash", retry_options=retry_config),
         name="lesson_plan_reviewer_agent",
@@ -898,32 +956,26 @@ async def main():
     runner = Runner(app=lesson_plan_app, session_service=session_service)
 
     session_id = f"lesson_{uuid.uuid4().hex[:8]}"
+    user_id = "test_user"
 
     await session_service.create_session(
-        app_name="lesson_plan_coordinator", user_id="test_user", session_id=session_id
+        app_name="lesson_plan_coordinator", user_id=user_id, session_id=session_id
     )
 
     query_content = types.Content(
         role="user", parts=[types.Part(text=json.dumps(user_response))]
     )
 
-    events = []
-
     async for event in runner.run_async(
-        user_id="test_user", session_id=session_id, new_message=query_content
+        user_id=user_id,
+        session_id=session_id,
+        new_message=query_content,
     ):
         events.append(event)
 
     approval_info = check_for_approval(events)
 
     if approval_info:
-        print("APPROVAL INFO", approval_info)
-        # {'approval_id': 'adk-2fa9b58d-d7e1-431d-b5bb-0852a11812a3', 'invocation_id': 'e-430471c1-c705-4b30-84b4-f6b0c2cc97f2'}
-
-        # Ask explicit approval and optional feedback text. We send both the
-        # boolean approval and the human's actual feedback text back to the
-        # paused invocation so the refiner agent (or human-feedback agent)
-        # can use it when resuming.
         approved_input = (
             input("Approve the lesson plan? (y/n) [y = approve]: ").strip().lower()
         )
@@ -934,61 +986,17 @@ async def main():
             "Optional feedback (enter any comments to pass to the refiner agent): "
         ).strip()
 
-        print(
-            "Hello -world ",
-            create_approval_response(
-                approval_info=approval_info,
-                user_feedback={
-                    "status": approved_bool,
-                    "feedback": feedback_text,
-                },
-            ),
+        query_content = create_approval_response(
+            approval_info=approval_info,
+            user_feedback={
+                "status": approved_bool,
+                "feedback": feedback_text,
+            },
         )
 
-        async for event in runner.run_async(
-            user_id="test_user",
-            session_id=session_id,
-            new_message=create_approval_response(
-                approval_info=approval_info,
-                user_feedback={
-                    "status": approved_bool,
-                    "feedback": feedback_text,
-                },
-            ),
-            invocation_id=approval_info["invocation_id"],
-        ):
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    if part.text:
-                        print(f"Agent response > {part.text}")
-    else:
-        print_agent_response(events)
-
-    return
-
-    # events = await runner.run_debug(json.dumps(user_response))
-
-    # print("\n\n\n Output:\n")
-
-    # print("\n\n\n Response Start")
-    # print(response)
-    # print("\n\n\n Response End")
-
-    # final_plan = None
-    # for step in response:
-    #     if hasattr(step, "content") and step.content.parts:
-    #         for part in step.content.parts:
-    #             if hasattr(part, "text"):
-    #                 try:
-    #                     parsed = safe_json_loads(part.text)
-    #                     if (
-    #                         isinstance(parsed, list)
-    #                         and parsed
-    #                         and parsed[0].startswith("Day ")
-    #                     ):
-    #                         final_plan = parsed
-    #                 except:
-    #                     pass
+        await ai_executor(
+            runner, user_id, session_id, query_content, approval_info["invocation_id"]
+        )
 
     final_output = []
 
@@ -1020,6 +1028,9 @@ async def main():
 
         while True:
             concept_tobe_used = user_concept_selection(final_output)
+            if concept_tobe_used == "EXIT":
+                print("Exiting the application...")
+                break
             print("Concept -> ", concept_tobe_used)
 
             if content_map.get(concept_tobe_used, ""):
