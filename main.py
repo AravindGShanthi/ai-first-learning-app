@@ -9,7 +9,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.google_llm import Gemini
 from google.adk.models import LlmRequest, LlmResponse
 from google.adk.runners import InMemoryRunner
-from google.adk.tools import FunctionTool
+from google.adk.tools import FunctionTool, google_search
 from google.adk.apps.app import App, ResumabilityConfig
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -410,8 +410,12 @@ async def content_generator(concept: str) -> str:
         name="content_generator_agent",
         description="output the generated content for a given topic/concept.",
         instruction="""
-            You are an expert AI Content Generator for educational purposes. Your task is to generate **high-quality, concise, and factually accurate content** for a single lesson concept or topic provided by the user. You will receive:
+            You are an expert AI Content Generator for educational purposes. Your task is to generate **high-quality, concise, and factually accurate content** for a single lesson concept or topic provided by the user.
 
+            You have access to tools including **google_search** for fact-checking and finding external learning resources.  
+            If you are uncertain about accuracy or need to source high-quality external resources, YOU MUST use the google_search tool.
+
+            You will receive:
             - topic/concept: The lesson topic to generate content for.
 
             Your responsibilities:
@@ -476,8 +480,11 @@ async def content_generator(concept: str) -> str:
             }}
 
             Your output must **strictly follow the JSON structure above** and include both free and paid resources. Focus on concise, accurate, and high-quality educational content.
+
+            If any required information is missing, first use the **google_search** tool to obtain it before producing the final JSON.
             """,
         output_key=CONTENT_GENERATOR_OUTPUT,
+        tools=[google_search],
     )
 
     content_reviewer_agent = Agent(
