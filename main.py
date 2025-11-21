@@ -43,8 +43,9 @@ def safe_json_loads(text):
     try:
         return json.loads(text)
     except Exception as e:
-        print("----- JSON PARSE ERROR -----")
-        print("RAW TEXT:", repr(text))
+        pass
+        # print("----- JSON PARSE ERROR -----")
+        # print("RAW TEXT:", repr(text))
         # raise e
 
 
