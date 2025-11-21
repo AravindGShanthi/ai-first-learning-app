@@ -79,14 +79,6 @@ def user_concept_selection(available_topics: list[str]) -> str:
 
             if user_input < 0:
                 return "EXIT"
-
-            print(
-                "User input => ",
-                user_input,
-                user_input > 0,
-                user_input <= len(available_topics),
-                type(user_input),
-            )
             if user_input > 0 and user_input <= len(available_topics):
                 return available_topics[user_input - 1]
             else:
@@ -157,7 +149,6 @@ def human_feedback_input(
         for part in getattr(tool_context.user_content, "parts", []):
             text = getattr(part, "text", None)
             if text:
-                print("TEXT ===> ", text)
                 try:
                     feedback_json = json.loads(text)
                     if "human_input" in feedback_json:
@@ -598,19 +589,15 @@ async def content_generator(concept: str) -> str:
 
     for event in events:
         if event.is_final_response() and event.content:
-            print(f"{'=' * 80}")
             if hasattr(event.content, "parts") and event.content.parts:
                 parts = []
                 for part in event.content.parts:
                     if hasattr(part, "text") and part.text:
                         parts.append(part.text.strip())
-                        print(" > ", part.text.strip())
                 joined_parts = "".join(parts)
                 parsed_output = safe_json_loads(joined_parts)
-                print("Parsed_output", parsed_output)
                 if parsed_output is not None and "title" in parsed_output:
                     final_output = parts
-            print(f"{'=' * 80}")
 
     joined_values = "".join(final_output)
 
