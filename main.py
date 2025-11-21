@@ -263,9 +263,7 @@ def lesson_before_model_callback(
         print("Exception -> ", e)
         prompt_test = str(llm_request)
 
-    print("prompt_test >> ", prompt_test, "")
     prompt_test = json.loads(basic_input_sanitize(prompt_test))
-    print("Santized input: ", prompt_test["topic"])
 
     topic = prompt_test["topic"]
     experience = prompt_test["learner_profile"]
@@ -327,26 +325,22 @@ def extract_latest_output(events):
             if part is None:
                 continue
 
-            # TEXT extraction
             text = getattr(part, "text", None)
             if isinstance(text, str):
                 stripped = text.strip()
 
-                # Track "APPROVED"
                 if stripped == "APPROVED":
                     last_approved = "APPROVED"
 
-                # Extract JSON inside ```json blocks
                 json_block = re.search(r"```json\s*(.*?)```", stripped, re.DOTALL)
                 if json_block:
                     raw_json = json_block.group(1).strip()
                     try:
                         parsed = json.loads(raw_json)
-                        last_json = parsed  # overwrite with latest valid JSON
+                        last_json = parsed
                     except Exception:
                         pass
 
-            # FUNCTION RESPONSE (exit_loop)
             func_resp = getattr(part, "function_response", None)
             if func_resp:
                 response_data = func_resp.response
@@ -356,11 +350,9 @@ def extract_latest_output(events):
                 ):
                     last_approved = "APPROVED"
 
-    # Priority 1: last valid JSON
     if last_json is not None:
         return last_json
 
-    # Priority 2: final APPROVED
     if last_approved is not None:
         return "APPROVED"
 
@@ -400,10 +392,6 @@ def print_agent_response(events):
 
 def create_approval_response(approval_info: dict, user_feedback: dict):
     """Create approval response message"""
-    # FunctionResponse must contain only the 'confirmed' boolean to comply
-    # with the Google ADK. Attach any free-text human feedback as a separate
-    # text part in the same Content so it becomes part of the resumed
-    # conversation context and can be consumed by downstream agents.
     confirmed_bool = bool(user_feedback.get("status", False))
     feedback_text = str(user_feedback.get("feedback", ""))
 
@@ -415,8 +403,6 @@ def create_approval_response(approval_info: dict, user_feedback: dict):
 
     parts = [types.Part(function_response=confirmation_response)]
     if feedback_text:
-        # Add a separate text part carrying the human feedback (JSON encoded
-        # so downstream agents can parse it reliably).
         parts.append(types.Part(text=json.dumps({"human_input": feedback_text})))
 
     return types.Content(role="user", parts=parts)
@@ -427,8 +413,6 @@ CONTENT_REVIEWER_OUTPUT = "reviewer_content"
 
 
 async def content_generator(concept: str) -> str:
-    print("content_generator -> ", concept)
-
     content_generator_agent = Agent(
         model=Gemini(model="gemini-2.5-flash", retry_options=retry_config),
         name="content_generator_agent",
@@ -628,32 +612,6 @@ async def content_generator(concept: str) -> str:
                     final_output = parts
             print(f"{'=' * 80}")
 
-    # print("XXXX" * 10)
-    # print(final_output.join)
-    # print("XXXX" * 10)
-
-    # output_values = [
-    #     '```json\n{\n  "title": "Python Environment Setup",\n  "description": "Setting up a Python environment involves creating isolated spaces for different projects, each with its own dependencies. This prevents conflicts between package versions and ensures project portability. Understanding environment setup is crucial for effective Python development.",\n  "detailed_explanation": "A Python environment is a self-contained directory that holds a specific Python interpreter and any installed libraries or packages. Using environments ensures that different projects can use different versions of libraries without interfering with each other.\\n\\n### Why use Python environments?\\n*   **Dependency Management**: Each project can have its own set of dependencies and package versions.\\n*   **Isolation**: Prevents conflicts when different projects require conflicting versions of the same library.\\n*   **Reproducibility**: Makes it easier for others to set up and run your project with the exact same dependencies.\\n\\n### Common Tools for Environment Setup:\\n\\n1.  **venv (Virtual Environment)**: Built into Python 3.3+, `venv` is the recommended way to create lightweight virtual environments for Python projects.\\n\\n    **Steps to use `venv`:**\\n    *   **Create an environment**: Navigate to your project directory and run:\\n        ```',
-    #     "bash\\n        python3 -m venv myenv\\n",
-    #     "```\\n        (Replace `myenv` with your desired environment name. On Windows, you might use `py -m venv myenv`.)\\n    *   **Activate the environment**:\\n        *   **macOS/Linux**:\\n            ```",
-    #     "bash\\n            source myenv/bin/activate\\n",
-    #     "```\\n        *   **Windows**:\\n            ```",
-    #     "bash\\n            myenv\\\\Scripts\\\\activate\\n",
-    #     "```\\n        Once activated, your terminal prompt will usually show the environment name (e.g., `(myenv)`).\\n    *   **Install packages**: Use `pip` as usual. Packages will be installed into this specific environment.\\n        ```",
-    #     "bash\\n        pip install requests beautifulsoup4\\n",
-    #     "```\\n    *   **Deactivate the environment**: When you're done working in the environment, simply type:\\n        ```",
-    #     "bash\\n        deactivate\\n",
-    #     "```\\n\\n2.  **Conda (Anaconda/Miniconda)**: A package, dependency, and environment manager that works for any language (not just Python). It's widely used in data science and machine learning communities because it handles non-Python libraries as well.\\n\\n    **Steps to use `conda` (after installing Anaconda/Miniconda):\\n    *   **Create an environment**:\\n        ```",
-    #     "bash\\n        conda create -n myenv python=3.9\\n",
-    #     "```\\n        This creates an environment named `myenv` with Python version 3.9.\\n    *   **Activate the environment**:\\n        ```",
-    #     "bash\\n        conda activate myenv\\n",
-    #     "```\\n    *   **Install packages**: Use `conda install` or `pip install`.\\n        ```",
-    #     "bash\\n        conda install numpy pandas\\n        pip install scikit-learn\\n",
-    #     "```\\n    *   **Deactivate the environment**: When you're done working in the environment, simply type:\\n        ```",
-    #     "bash\\n        conda deactivate\\n",
-    #     '```\\n\\n### Best Practices:\\n*   Create a new environment for each project.\\n*   Use a `requirements.txt` file to list project dependencies (`pip freeze > requirements.txt`) and install them (`pip install -r requirements.txt`).\\n*   Name your environments descriptively (e.g., `project-name-env`).",\n  "external_resources": {\n    "free": [\n      {\n        "title": "Python Virtual Environments (venv) - Official Documentation",\n        "url": "https://docs.python.org/3/library/venv.html",\n        "rating": "5/5",\n        "price": "0",\n        "value_for_money": "High"\n      },\n      {\n        "title": "Real Python: Python Virtual Environments: A Primer",\n        "url": "https://realpython.com/python-virtual-environments-a-primer/",\n        "rating": "4.9/5",\n        "price": "0",\n        "value_for_money": "High"\n      },\n      {\n        "title": "Anaconda: Managing environments",\n        "url": "https://docs.conda.io/en/latest/user-guide/tasks/manage-environments.html",\n        "rating": "4.8/5",\n        "price": "0",\n        "value_for_money": "High"\n      },\n      {\n        "title": "Programiz: Python Virtual Environment",\n        "url": "https://www.programiz.com/python-programming/virtual-environment/",\n        "rating": "4.6/5",\n        "price": "0",\n        "value_for_money": "High"\n      },\n      {\n        "title": "GeeksforGeeks: Virtual Environment in Python",\n        "url": "https://www.geeksforgeeks.org/virtual-environment-in-python/",\n        "rating": "4.5/5",\n        "price": "0",\n        "value_for_money": "Medium"\n      }\n    ],\n    "paid": [\n      {\n        "title": "Python for Everybody Specialization",\n        "url": "https://www.coursera.org/specializations/python",\n        "rating": "4.8/5 (234,000+ ratings)",\n        "price": "$49/month (after free trial)",\n        "value_for_money": "High"\n      },\n      {\n        "title": "100 Days of Code - The Complete Python Pro Bootcamp for 2023",\n        "url": "https://www.udemy.com/course/100-days-of-code/",\n        "rating": "4.7/5 (500,000+ ratings)",\n        "price": "$14.99 - $19.99 (frequent sales)",\n        "value_for_money": "High"\n      },\n      {\n        "title": "Automate the Boring Stuff with Python Programming",\n        "url": "https://www.udemy.com/course/automate/",\n        "rating": "4.7/5 (193,000+ ratings)",\n        "price": "$14.99 - $19.99 (frequent sales)",\n        "value_for_money": "High"\n      },\n      {\n        "title": "Complete Python Bootcamp From Zero to Hero in Python",\n        "url": "https://www.udemy.com/course/complete-python-bootcamp/",\n        "rating": "4.6/5 (1.5M+ ratings)",\n        "price": "$14.99 - $19.99 (frequent sales)",\n        "value_for_money": "High"\n      },\n      {\n        "title": "The Python Mega Course: From Zero to Hero in Python",\n        "url": "https://www.udemy.com/course/the-python-mega-course/",\n        "rating": "4.6/5 (278,000+ ratings)",\n        "price": "$14.99 - $19.99 (frequent sales)",\n        "value_for_money": "High"\n      }\n    ]\n  }\n}\n```',
-    # ]
-
     joined_values = "".join(final_output)
 
     print("XXXX" * 10)
@@ -673,13 +631,6 @@ async def ai_executor(
     query_content: str,
     invocation_id: Optional[str] = None,
 ):
-    print(
-        "\n\nExecuting AI Executer -- ",
-        user_id,
-        session_id,
-        query_content,
-        invocation_id,
-    )
     dummy_events = []
     if invocation_id:
         async for event in runner.run_async(
@@ -694,8 +645,6 @@ async def ai_executor(
         return
 
     approval_info = check_for_approval(dummy_events)
-
-    print("Approval Info", approval_info)
 
     if approval_info:
         approved_input = (
@@ -722,7 +671,6 @@ async def ai_executor(
 
 
 async def main():
-    # Get user input
     user_response = user_input()
 
     lesson_plan_generator_agent = Agent(
@@ -1016,11 +964,9 @@ async def main():
 
     for event in events:
         if event.is_final_response() and event.content:
-            print(f"{'=' * 80}")
             if hasattr(event.content, "parts") and event.content.parts:
                 for part in event.content.parts:
                     if hasattr(part, "text") and part.text:
-                        print(">>", part.text)
                         try:
                             parts = safe_json_loads(part.text)
                             if isinstance(parts, list) and all(
@@ -1030,21 +976,15 @@ async def main():
                                 final_output = parts
                         except:
                             pass
-            print(f"{'=' * 80}")
-
-    print("FINAL _ OUTPUT: ", final_output)
 
     if final_output:
-        print("\nFINAL LESSON PLAN:")
         for day in final_output:
             print(day)
 
         while True:
             concept_tobe_used = user_concept_selection(final_output)
             if concept_tobe_used == "EXIT":
-                print("Exiting the application...")
                 break
-            print("Concept -> ", concept_tobe_used)
 
             if content_map.get(concept_tobe_used, ""):
                 print(
@@ -1052,8 +992,8 @@ async def main():
                     content_map.get(concept_tobe_used, ""),
                 )
             else:
-                content_output = await content_generator(concept_tobe_used)
                 print("Storing content")
+                content_output = await content_generator(concept_tobe_used)
                 content_map[concept_tobe_used] = content_output
 
     else:
@@ -1068,10 +1008,3 @@ if __name__ == "__main__":
     #     )
     # )
     print("Program done")
-
-
-# TODO:
-# 1. Add human in the loop to get the feedback for lesson plan and regenerate if necessary
-# 2. Give Google search tool to Content creator agent for course and content search.
-# 3. Need to evaluate the AI models for optimal performance
-# 4. Deploy the model in production using Goole cloud
