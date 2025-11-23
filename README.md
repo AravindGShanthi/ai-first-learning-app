@@ -8,6 +8,10 @@ AI powered course creator application creates dynamic course lesson plan and con
 
 **Programming Language:** Python, Google ADK
 
+## System Architecture
+![My First Board](https://github.com/user-attachments/assets/6e6e2739-7bc7-40df-9481-5fbcda1082ae)
+
+
 
 ## Run Locally
 
